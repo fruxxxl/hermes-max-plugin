@@ -1,36 +1,37 @@
 # Hermes MAX Platform Plugin
 
-[MAX messenger](https://max.ru) (VK's national messenger) platform adapter for
-[Hermes Agent](https://hermes-agent.nousresearch.com) — run your AI agent in
-MAX alongside Telegram, WhatsApp, Discord and the rest of the Hermes gateway
-family.
+Платформенный адаптер мессенджера [MAX](https://max.ru) для
+[Hermes Agent](https://hermes-agent.nousresearch.com) — запускайте своего
+AI-агента в MAX параллельно с Telegram, WhatsApp, Discord и остальными
+платформами Hermes-шлюза.
 
 ```
-You (MAX app) ──▶ MAX Bot API ──▶ this plugin ──▶ Hermes Agent ──▶ your tools, skills, memory
+Вы (приложение MAX) ──▶ MAX Bot API ──▶ этот плагин ──▶ Hermes Agent ──▶ инструменты, скиллы, память
 ```
 
-## Features
+## Возможности
 
-- **Long-polling transport** (`GET /updates`) — no public IP, domain, or TLS
-  certificate needed. Works behind NAT out of the box.
-- **Dialogs and group chats** — group traffic is keyed per chat, DMs per user.
-- **Outbound text messages** with **reply links** (`link.type=reply`).
-- **Photo upload** (images → `POST /messages` attachments).
-- **Typing indicator** while the agent is thinking.
-- **Deduplication** of updates (safe redelivery), automatic marker cursor
-  management, reconnect with backoff.
-- **Runs next to other platforms** — MAX and Telegram can be enabled at the
-  same time on one gateway.
+- **Long-polling транспорт** (`GET /updates`) — не нужны публичный IP, домен
+  и TLS-сертификат. Работает за NAT из коробки.
+- **Диалоги и групповые чаты** — групповой трафик ключуется по чату, личные
+  сообщения — по пользователю.
+- **Исходящие текстовые сообщения** с **reply-ссылками** (`link.type=reply`).
+- **Загрузка фото** (картинки → `POST /messages` attachments).
+- **Индикатор набора текста**, пока агент думает.
+- **Дедупликация** апдейтов (безопасные повторные доставки), автоматическое
+  управление курсором-маркером, реконнект с backoff.
+- **Работает вместе с другими платформами** — MAX и Telegram можно включить
+  одновременно на одном шлюзе.
 
-## Requirements
+## Требования
 
-- Hermes Agent ≥ 1.16 with the plugin loader (`plugins/platforms/`)
-- A MAX bot. Create one via [@MasterBot](https://max.ru/masterbot) (verified
-  business account required) and copy the bot token.
+- Hermes Agent ≥ 1.16 с загрузчиком плагинов (`plugins/platforms/`)
+- Бот в MAX. Создаётся через [@MasterBot](https://max.ru/masterbot)
+  (нужна верифицированная бизнес-страница), токен бота копируете оттуда.
 
-## Installation
+## Установка
 
-1. Copy the plugin into your Hermes installation:
+1. Скопируйте плагин в установленную копию Hermes:
 
    ```bash
    git clone https://github.com/fruxxxl/hermes-max-plugin.git
@@ -38,101 +39,103 @@ You (MAX app) ──▶ MAX Bot API ──▶ this plugin ──▶ Hermes Agent
        /usr/local/lib/hermes-agent/plugins/platforms/
    ```
 
-2. Put the bot token in `~/.hermes/.env` (do **not** commit it):
+2. Положите токен бота в `~/.hermes/.env` (не коммитьте его!):
 
    ```bash
-   MAX_BOT_TOKEN=<your token from @MasterBot>
-   # Hermes authorizes senders via allowlists (default: deny)
-   MAX_ALLOWED_USERS=<your MAX user_id, comma-separated>
+   MAX_BOT_TOKEN=<токен из @MasterBot>
+   # Hermes авторизует отправителей по allowlist (по умолчанию: deny)
+   MAX_ALLOWED_USERS=<ваш MAX user_id, через запятую>
    ```
 
-3. Enable the platform in `~/.hermes/config.yaml`:
+3. Включите платформу в `~/.hermes/config.yaml`:
 
    ```yaml
    max:
      enabled: true
-     allowed_chats: ""      # empty = DMs allowed
-     require_mention: true  # groups: only react when mentioned
+     allowed_chats: ""      # пусто = разрешены личные сообщения
+     require_mention: true  # в группах отвечать только на @упоминания
    ```
 
-4. Restart the gateway:
+4. Перезапустите шлюз:
 
    ```bash
    hermes gateway restart
    ```
 
-   You should see in the logs:
+   В логах должно появиться:
 
    ```
    [Max] Connected as @your_bot (…)
    ✓ max connected
    ```
 
-Write to your bot in MAX — it answers with the full agent behind it.
+Напишите боту в MAX — он ответит со всем арсеналом агента за спиной.
 
-## Configuration reference
+## Справочник по конфигурации
 
-| Env / config | Meaning |
+| Переменная / ключ | Значение |
 |---|---|
-| `MAX_BOT_TOKEN` | Bot token from @MasterBot (**required**) |
-| `MAX_ALLOWED_USERS` | Comma-separated allowlist of MAX user IDs (**required** — default deny) |
-| `MAX_ALLOW_ALL_USERS` | `true` to allow anyone (dev only) |
-| `max.allowed_chats` | Restrict to specific chat IDs; empty = DMs |
-| `max.require_mention` | In groups, only respond to @mentions |
+| `MAX_BOT_TOKEN` | Токен бота из @MasterBot (**обязательно**) |
+| `MAX_ALLOWED_USERS` | Allowlist MAX user_id через запятую (**обязательно** — по умолчанию deny) |
+| `MAX_ALLOW_ALL_USERS` | `true` — пускать всех (только для разработки) |
+| `max.allowed_chats` | Ограничить конкретными chat_id; пусто = личные сообщения |
+| `max.require_mention` | В группах реагировать только на @упоминания |
 
-## MAX Bot API pitfalls (learned the hard way)
+## Грабли MAX Bot API (выучено на собственной шкуре)
 
-This plugin exists because the MAX Bot API has a few non-obvious behaviors.
-All of them are handled here, documented so the next person doesn't lose an
-evening:
+Плагин существует потому, что у MAX Bot API есть несколько неочевидных
+поведений. Все они здесь учтены и задокументированы, чтобы следующий человек
+не потерял вечер:
 
-1. **`chat_id` goes in the query string, not the JSON body.** `POST /messages`
-   takes `chat_id`/`user_id` as *query parameters*; the body carries only
-   `text`/`attachments`. Sending `chat_id` in the body returns
-   `400 proto.payload: Unknown recipient` — the server simply ignores the body
-   field. (Confirmed against the official TS SDK: `query: { chat_id, user_id }`.)
-2. **Dialog updates have no `chat` object.** In `message_created` updates the
-   chat id lives at `message.recipient.chat_id`; a top-level `message.chat`
-   only appears for group chats. Sender info is `message.sender` (not `from`).
-3. **Authorization is default-deny in Hermes.** Even with a working poll loop,
-   messages are silently dropped until `MAX_ALLOWED_USERS` lists the sender —
-   there is no error in the logs, just `Queued inbound message … chat=`.
-4. **Any `GET /updates` advances the cursor.** Polling the same token from a
-   second consumer (a debugging `curl`!) consumes updates from the gateway.
-   One token = one poller.
-5. **`Authorization` header (not `access_token` query param).** The documented
-   `?access_token=` style works for `/me` but the header form is the reliable
-   one across endpoints.
+1. **`chat_id` передаётся в query string, а не в JSON-теле.** `POST /messages`
+   принимает `chat_id`/`user_id` как *query-параметры*; в теле — только
+   `text`/`attachments`. Отправка `chat_id` в теле возвращает
+   `400 proto.payload: Unknown recipient` — сервер просто игнорирует поле.
+   (Проверено по официальному TS SDK: `query: { chat_id, user_id }`.)
+2. **В апдейтах диалогов нет объекта `chat`.** В апдейтах `message_created`
+   id чата лежит в `message.recipient.chat_id`; объект `message.chat`
+   появляется только для групп. Данные отправителя — `message.sender`
+   (не `from`).
+3. **Авторизация в Hermes — deny по умолчанию.** Даже с рабочим poll-циклом
+   сообщения молча дропаются, пока `MAX_ALLOWED_USERS` не содержит
+   отправителя — в логах нет ошибки, только `Queued inbound message … chat=`.
+4. **Любой `GET /updates` двигает курсор.** Поллинг того же токена вторым
+   потребителем (отладочным `curl`!) забирает апдейты у шлюза.
+   Один токен = один poller.
+5. **Заголовок `Authorization` (не `access_token` в query).** Задокументированный
+   стиль `?access_token=` работает для `/me`, но форма заголовка надёжна для
+   всех эндпоинтов.
 
-## Local development & tests
+## Разработка и тесты
 
 ```bash
 cd hermes-max-plugin
-python -m pytest tests/ -v     # offline unit tests, no token needed
+python -m pytest tests/ -v     # офлайн юнит-тесты, токен не нужен
 ```
 
-The test suite covers update parsing (dialog/group), own-message echo
-skipping, deduplication, and the exact wire shape of `send()` (query params,
-reply links, truncation).
+Тесты покрывают разбор апдейтов (диалог/группа), пропуск эха собственных
+сообщений бота, дедупликацию и точную wire-форму `send()` (query-параметры,
+reply-ссылки, обрезка длинного текста).
 
-## Repository layout
+## Структура репозитория
 
 ```
 plugins/platforms/max/
-├── __init__.py    # plugin entrypoint (export: register)
-├── adapter.py     # BasePlatformAdapter implementation
-└── plugin.yaml    # plugin metadata
+├── __init__.py    # точка входа плагина (export: register)
+├── adapter.py     # реализация BasePlatformAdapter
+└── plugin.yaml    # метаданные плагина
 tests/test_adapter.py
 examples/config.yaml.example
+examples/dot-env.example
 ```
 
-## License
+## Лицензия
 
-MIT — see [LICENSE](LICENSE).
+MIT — см. [LICENSE](LICENSE).
 
-## Credits
+## Автор
 
-Built while wiring a private Hermes deployment to MAX; transport details
-cross-checked against the official
+[Alexander Shulgin](https://github.com/fruxxxl) — плагин написан при подключении
+частного Hermes-деплоя к MAX; детали транспорта сверены с официальным
 [max-bot-api-client-ts](https://github.com/max-messenger/max-bot-api-client-ts).
-Not affiliated with VK / MAX.
+Не аффилировано с VK / MAX.
