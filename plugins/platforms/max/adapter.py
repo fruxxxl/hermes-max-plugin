@@ -74,6 +74,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_API = "https://botapi.max.ru"
 MAX_MESSAGE_LENGTH = 4000  # MAX practical text limit
+TYPING_REFRESH_S = 4.0     # re-fire typing_on while a turn is in flight
 POLL_TIMEOUT_SECONDS = 30  # server-side long poll window
 POLL_HTTP_TIMEOUT = POLL_TIMEOUT_SECONDS + 20
 RECONNECT_BACKOFF = [2, 5, 10, 30, 60]
@@ -119,6 +120,7 @@ class MaxAdapter(BasePlatformAdapter):
         self._http_client: Optional["httpx.AsyncClient"] = None
         self._marker: Optional[int] = None  # long-poll cursor
         self._seen_messages: Dict[str, float] = {}
+        self._typing_tasks: Dict[str, "asyncio.Task[None]"] = {}
 
     # -- HTTP helpers -------------------------------------------------------
 
@@ -204,6 +206,10 @@ class MaxAdapter(BasePlatformAdapter):
     async def disconnect(self) -> None:
         self._running = False
         self._mark_disconnected()
+        for task in self._typing_tasks.values():
+            if not task.done():
+                task.cancel()
+        self._typing_tasks.clear()
         if self._poll_task:
             self._poll_task.cancel()
             try:
@@ -322,6 +328,7 @@ class MaxAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="HTTP client not initialized")
 
         # dialog chat_id == peer user_id on MAX; pass it as user_id query param
+        self._stop_typing(chat_id)
         params: Dict[str, str] = {"chat_id": chat_id}
         payload: Dict[str, Any] = {"text": content[:MAX_MESSAGE_LENGTH]}
         if reply_to and str(reply_to).startswith("mid."):
@@ -388,8 +395,79 @@ class MaxAdapter(BasePlatformAdapter):
             return SendResult(success=False, error=str(e))
 
     async def send_typing(self, chat_id: str, metadata=None) -> None:
-        """MAX Bot API has no typing indicator (yet)."""
-        pass
+        """Show a typing indicator via POST /chats/{chat_id}/actions.
+
+        The action type is ``typing_on`` (see the official SDK's SenderAction).
+        The indicator auto-expires server-side after a few seconds, so this
+        also (re)spawns a lightweight refresher task that re-fires the action
+        every TYPING_REFRESH_S until the next outbound message lands in the
+        chat or the task is cancelled — giving a sustained Telegram-like
+        indicator while the agent thinks. Failures are swallowed: a dropped
+        indicator must never break a turn.
+        """
+        # one-shot fire
+        self._fire_typing(chat_id)
+        # refresh loop (single task per chat)
+        prev = self._typing_tasks.get(chat_id)
+        if prev is not None and not prev.done():
+            return  # already refreshing
+        try:
+            self._typing_tasks[chat_id] = asyncio.create_task(
+                self._typing_refresher(chat_id)
+            )
+        except RuntimeError:  # no running loop (unit tests) — one-shot only
+            pass
+
+    def _stop_typing(self, chat_id: str) -> None:
+        """Cancel the typing refresher once a real message lands in the chat."""
+        task = self._typing_tasks.pop(chat_id, None)
+        if task is not None and not task.done():
+            task.cancel()
+
+    def _fire_typing(self, chat_id: str) -> None:
+        try:
+            if self._http_client is None:
+                from httpx import AsyncClient
+                self._http_client = AsyncClient(
+                    base_url=self._api, headers={"Authorization": self._token}, timeout=15.0
+                )
+            client = self._http_client
+            resp = asyncio.ensure_future(
+                client.post(
+                    f"/chats/{chat_id}/actions",
+                    json={"action": "typing_on"},
+                    timeout=10.0,
+                )
+            )
+            _ = resp  # fire-and-forget; errors surface in the refresher loop
+        except Exception as e:
+            logger.debug("[%s] send_typing failed (ignored): %s", self.name, e)
+
+    async def _typing_refresher(self, chat_id: str) -> None:
+        try:
+            while True:
+                await asyncio.sleep(TYPING_REFRESH_S)
+                client = self._http_client
+                if client is None:
+                    return
+                try:
+                    resp = await client.post(
+                        f"/chats/{chat_id}/actions",
+                        json={"action": "typing_on"},
+                        timeout=10.0,
+                    )
+                    if resp.status_code >= 300:
+                        logger.debug(
+                            "[%s] typing refresh HTTP %s (stopping)",
+                            self.name, resp.status_code,
+                        )
+                        return
+                except Exception:
+                    return  # network gone — stop silently
+        except asyncio.CancelledError:
+            pass
+        finally:
+            self._typing_tasks.pop(chat_id, None)
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         try:
