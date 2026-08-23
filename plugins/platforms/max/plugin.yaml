@@ -1,0 +1,28 @@
+name: max-platform
+label: MAX
+kind: platform
+version: 1.0.0
+description: >
+  MAX (max.ru) messenger platform adapter for Hermes Agent. Long-polls the
+  MAX Bot API for dialogs and group chats, sends text/photo replies, runs
+  alongside other gateway platforms (Telegram, WhatsApp, ...).
+author: Alexander Shulgin
+homepage: https://github.com/fruxxxl/hermes-max-plugin
+license: MIT
+python_requires: ">=3.11"
+dependencies: [httpx]
+entrypoint: adapter.py
+exports:
+  platform: max
+  register: register
+config_schema:
+  env:
+    MAX_BOT_TOKEN:
+      required: true
+      description: Bot token issued by @MasterBot (dev.max.ru)
+    MAX_ALLOWED_USERS:
+      required: false
+      description: Comma-separated allowlist of MAX user IDs (default deny)
+    MAX_ALLOW_ALL_USERS:
+      required: false
+      description: "true to allow any sender (dev only)"

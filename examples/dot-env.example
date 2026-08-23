@@ -1,0 +1,6 @@
+# ~/.hermes/.env
+MAX_BOT_TOKEN=<bot token from @MasterBot>
+# Hermes default-denies unknown senders; list allowed MAX user_ids:
+MAX_ALLOWED_USERS=55608376
+# dev only — allow anyone:
+# MAX_ALLOW_ALL_USERS=true

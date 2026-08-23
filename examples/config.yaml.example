@@ -1,0 +1,5 @@
+# ~/.hermes/config.yaml (fragment)
+max:
+  enabled: true
+  allowed_chats: ""      # empty = DMs allowed
+  require_mention: true  # groups: only react when mentioned
