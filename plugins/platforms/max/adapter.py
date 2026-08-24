@@ -6,6 +6,10 @@ Connects to the MAX messenger (dev.max.ru) Bot API:
 - Sends replies via ``POST /messages``
 - Uploads photos via ``POST /photos`` (uploads endpoint) and sends by token
 - Receives photo attachments via body.file_id -> GET /files/{id}
+- Sustained typing indicator while the agent thinks (``typing_on`` action)
+- ``/menu`` command replies with an inline keyboard of the agent's slash
+  commands (MAX has no setMyCommands; button presses arrive as
+  ``message_callback`` updates and re-enter the agent as commands)
 
 No external SDK — only httpx, already a Hermes dependency.
 
@@ -69,12 +73,28 @@ def _get_scoped_secret(name, default=None):
     return val if val is not None else default
 
 
+def _core_menu_commands() -> List[tuple]:
+    """(name, description) pairs from the shared Hermes command registry.
+
+    Reuses the Telegram menu source: it reads the same core CommandDef
+    registry (platform-agnostic), only sanitizing names for Telegram.
+    """
+    try:
+        from hermes_cli.commands import telegram_bot_commands
+        return telegram_bot_commands() or []
+    except Exception:
+        return []
+
+
 logger = logging.getLogger(__name__)
 
 
 DEFAULT_API = "https://botapi.max.ru"
 MAX_MESSAGE_LENGTH = 4000  # MAX practical text limit
-TYPING_REFRESH_S = 4.0     # re-fire typing_on while a turn is in flight
+TYPING_REFRESH_S = 2.0     # re-fire typing_on while a turn is in flight (server expires it in ~3s)
+MENU_COMMAND = "/menu"
+MENU_MAX_BUTTONS = 12
+MENU_BUTTONS_PER_ROW = 2
 POLL_TIMEOUT_SECONDS = 30  # server-side long poll window
 POLL_HTTP_TIMEOUT = POLL_TIMEOUT_SECONDS + 20
 RECONNECT_BACKOFF = [2, 5, 10, 30, 60]
@@ -174,7 +194,10 @@ class MaxAdapter(BasePlatformAdapter):
         backoff_idx = 0
         while self._running:
             try:
-                params: Dict[str, Any] = {"timeout": POLL_TIMEOUT_SECONDS, "types": "message_created"}
+                params: Dict[str, Any] = {
+                    "timeout": POLL_TIMEOUT_SECONDS,
+                    "types": "message_created,message_callback",
+                }
                 if self._marker is not None:
                     params["marker"] = self._marker
                 data = await self._api_get("/updates", params=params)
@@ -231,6 +254,9 @@ class MaxAdapter(BasePlatformAdapter):
             chat = (update.get("chat") or {})
             logger.info("[%s] Bot started in chat %s", self.name, chat.get("chat_id"))
             return
+        if utype == "message_callback":
+            await self._on_callback(update)
+            return
         if utype != "message_created":
             return
 
@@ -262,6 +288,10 @@ class MaxAdapter(BasePlatformAdapter):
             return
 
         text = (message.get("body") or {}).get("text") or ""
+
+        if text.strip().lower() == MENU_COMMAND:
+            await self.send_menu(chat_id)
+            return
 
         # photo attachments -> fetch and expose as file refs
         attachments = []
@@ -309,7 +339,109 @@ class MaxAdapter(BasePlatformAdapter):
         self._seen_messages[msg_id] = now
         return False
 
+    async def _on_callback(self, update: Dict[str, Any]) -> None:
+        """Inline-keyboard button press -> answer the callback, run the command.
+
+        The button payload is a slash command (``/status``), so the press is
+        re-surfaced to the agent as a COMMAND event from the pressing user.
+        """
+        callback = update.get("callback") or {}
+        payload = (callback.get("payload") or "").strip()
+        callback_id = callback.get("callback_id")
+        user = callback.get("user") or {}
+        message = update.get("message") or {}
+
+        recipient = message.get("recipient") or {}
+        chat = message.get("chat") or {}
+        chat_id = (
+            str(chat.get("chat_id") or recipient.get("chat_id") or "")
+            or str(user.get("user_id", ""))
+        )
+
+        # stop the client-side spinner even if we can't run the payload
+        if callback_id and self._http_client:
+            try:
+                await self._http_client.post(
+                    f"{self._api}/answers",
+                    headers=self._headers(),
+                    params={"callback_id": callback_id},
+                    json={},
+                    timeout=10.0,
+                )
+            except Exception as e:
+                logger.debug("[%s] answer callback failed (ignored): %s", self.name, e)
+
+        if not payload:
+            return
+        if payload.strip().lower() == MENU_COMMAND:
+            # /menu is adapter-local (not a Hermes slash command) — show the
+            # menu instead of forwarding it to the agent
+            await self.send_menu(chat_id)
+            return
+
+        user_id = str(user.get("user_id", ""))
+        user_name = " ".join(
+            x for x in (user.get("first_name"), user.get("last_name")) if x
+        ) or user.get("username") or user_id
+
+        source = self.build_source(
+            chat_id=chat_id,
+            chat_name=chat.get("title") or user_name,
+            chat_type="group" if chat.get("chat_id") else "dm",
+            user_id=user_id,
+            user_name=user_name,
+        )
+        event = MessageEvent(
+            text=payload,
+            message_type=MessageType.COMMAND,
+            source=source,
+            message_id=f"cb.{callback_id}",
+            raw_message=update,
+            timestamp=datetime.now(tz=timezone.utc),
+        )
+        await self.handle_message(event)
+
     # -- Outbound --------------------------------------------------------------
+
+    def _build_menu_keyboard(self) -> List[List[Dict[str, Any]]]:
+        rows: List[List[Dict[str, Any]]] = []
+        row: List[Dict[str, Any]] = []
+        for name, _desc in _core_menu_commands()[:MENU_MAX_BUTTONS]:
+            row.append({"type": "callback", "text": f"/{name}", "payload": f"/{name}"})
+            if len(row) >= MENU_BUTTONS_PER_ROW:
+                rows.append(row)
+                row = []
+        if row:
+            rows.append(row)
+        return rows
+
+    async def send_menu(self, chat_id: str) -> None:
+        """Send the bot command menu as an inline keyboard (MAX Bot API has
+        no setMyCommands equivalent — menus are inline keyboards)."""
+        if not self._http_client:
+            return
+        keyboard = self._build_menu_keyboard()
+        try:
+            resp = await self._http_client.post(
+                f"{self._api}/messages",
+                headers=self._headers(),
+                params={"chat_id": chat_id},
+                json={
+                    "text": "Меню команд — нажмите кнопку:",
+                    "attachments": [{
+                        "type": "inline_keyboard",
+                        "payload": {"buttons": keyboard},
+                    }],
+                },
+                timeout=20.0,
+            )
+            if resp.status_code >= 300:
+                logger.warning(
+                    "[%s] send_menu HTTP %s: %s",
+                    self.name, resp.status_code, resp.text[:200],
+                )
+        except Exception as e:
+            logger.warning("[%s] send_menu failed: %s", self.name, e)
 
     async def send(
         self,
@@ -425,16 +557,17 @@ class MaxAdapter(BasePlatformAdapter):
             task.cancel()
 
     def _fire_typing(self, chat_id: str) -> None:
+        # NOTE: the shared client from connect() has no base_url, so the URL
+        # must be absolute — a relative path makes httpx raise, which the old
+        # code swallowed (no indicator was ever sent). Same for the auth
+        # header: it is not set on the client, only per-request.
+        if self._http_client is None:
+            return
         try:
-            if self._http_client is None:
-                from httpx import AsyncClient
-                self._http_client = AsyncClient(
-                    base_url=self._api, headers={"Authorization": self._token}, timeout=15.0
-                )
-            client = self._http_client
             resp = asyncio.ensure_future(
-                client.post(
-                    f"/chats/{chat_id}/actions",
+                self._http_client.post(
+                    f"{self._api}/chats/{chat_id}/actions",
+                    headers=self._headers(),
                     json={"action": "typing_on"},
                     timeout=10.0,
                 )
@@ -452,7 +585,8 @@ class MaxAdapter(BasePlatformAdapter):
                     return
                 try:
                     resp = await client.post(
-                        f"/chats/{chat_id}/actions",
+                        f"{self._api}/chats/{chat_id}/actions",
+                        headers=self._headers(),
                         json={"action": "typing_on"},
                         timeout=10.0,
                     )
@@ -557,6 +691,6 @@ def register(ctx) -> None:
         platform_hint=(
             "You are communicating via the MAX messenger. MAX supports "
             "markdown in messages. Keep responses under 4000 characters "
-            "per message."
+            "per message. The command menu is available via /menu."
         ),
     )
