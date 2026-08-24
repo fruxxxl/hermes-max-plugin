@@ -4,7 +4,8 @@ MAX platform adapter (Hermes plugin).
 Connects to the MAX messenger (dev.max.ru) Bot API:
 - Long-polls ``/updates`` for new messages (dialogs + chats)
 - Sends replies via ``POST /messages``
-- Uploads photos via ``POST /photos`` (uploads endpoint) and sends by token
+- Uploads photos via ``POST /uploads`` (get URL -> multipart ``data`` ->
+  token); there is no direct ``POST /photos`` endpoint (404)
 - Receives photo attachments via body.file_id -> GET /files/{id}
 - Sustained typing indicator while the agent thinks (``typing_on`` action)
 - ``/menu`` command replies with an inline keyboard of the agent's slash
@@ -492,31 +493,51 @@ class MaxAdapter(BasePlatformAdapter):
         caption: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
-        """Upload a photo and send it to a MAX chat."""
+        """Upload a photo and send it to a MAX chat.
+
+        There is no ``POST /photos`` endpoint (404). The working flow:
+        ``POST /uploads?chat_id=&type=image`` returns an ``url``; the file
+        is POSTed to that url as multipart field ``data``; the response's
+        ``photos`` is a **dict** ``{photoId: {"token": ...}}`` (not a list);
+        the token goes into the message attachment payload.
+        """
         if not self._http_client:
             return SendResult(success=False, error="HTTP client not initialized")
         try:
+            resp = await self._http_client.post(
+                f"{self._api}/uploads",
+                headers=self._headers(),
+                params={"chat_id": chat_id, "type": "image"},
+                timeout=20.0,
+            )
+            if resp.status_code >= 300:
+                return SendResult(success=False, error=f"get upload URL HTTP {resp.status_code}: {resp.text[:200]}")
+            upload_url = (resp.json() or {}).get("url")
+            if not upload_url:
+                return SendResult(success=False, error="uploads returned no url")
+
             with open(file_path, "rb") as f:
                 resp = await self._http_client.post(
-                    f"{self._api}/photos",
-                    headers={"Authorization": self._token},
+                    upload_url,
                     files={"data": f},
-                    timeout=60.0,
+                    timeout=120.0,
                 )
             if resp.status_code >= 300:
                 return SendResult(success=False, error=f"upload HTTP {resp.status_code}: {resp.text[:200]}")
-            photos = resp.json().get("photos", [])
-            if not photos:
+            photos = (resp.json() or {}).get("photos") or {}
+            token = next(iter(photos.values()), {}).get("token") if photos else None
+            if not token:
                 return SendResult(success=False, error="upload returned no photo token")
-            token = photos[0]["token"]
-            payload: Dict[str, Any] = {}  # photo token goes in attachments? -> send via query chat_id
-            if caption:
-                payload["text"] = caption[:MAX_MESSAGE_LENGTH]
+
+            payload: Dict[str, Any] = {
+                "text": caption[:MAX_MESSAGE_LENGTH] if caption else None,
+                "attachments": [{"type": "image", "payload": {"token": token}}],
+            }
             resp = await self._http_client.post(
                 f"{self._api}/messages",
                 headers=self._headers(),
                 params={"chat_id": chat_id},
-                json={"text": payload.get("text"), "attachments": [{"type": "image", "payload": {"token": token}}]},
+                json=payload,
                 timeout=20.0,
             )
             if resp.status_code < 300:

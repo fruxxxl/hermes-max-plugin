@@ -267,3 +267,51 @@ def test_menu_callback_shows_menu_not_unknown_command(monkeypatch):
     assert fh.calls[0][0].endswith("/answers")
     assert fh.calls[1][0].endswith("/messages")
     assert fh.calls[1][1]["json"]["attachments"][0]["type"] == "inline_keyboard"
+
+
+def test_send_media_uses_uploads_flow(tmp_path):
+    # regression: POST /photos is 404 on botapi.max.ru — the flow is
+    # POST /uploads -> upload url -> multipart "data" -> photos DICT
+    a = make_adapter()
+    photo = tmp_path / "pic.png"
+    photo.write_bytes(b"\x89PNG-fake")
+    responses = [
+        {"url": "https://upl.max.ru/u/abc"},                      # POST /uploads
+        {"photos": {"ph-1": {"token": "photo-token"}}},           # multipart upload
+        {"message": {"body": {"mid": "mid.ph"}}},                 # POST /messages
+    ]
+
+    class SeqHttp:
+        def __init__(self):
+            self.calls = []
+
+        async def post(self, url, **kw):
+            self.calls.append((url, kw))
+            r = FakeResp()
+            r._json = responses[len(self.calls) - 1]
+            r.json = lambda: r._json
+            return r
+
+    fh = SeqHttp()
+    a._http_client = fh
+    r = asyncio.run(a.send_media("443805158", str(photo), caption="смотри"))
+    assert r.success
+    # step 1: upload URL is requested with chat_id + type=image
+    url, kw = fh.calls[0]
+    assert url == "https://botapi.max.ru/uploads"
+    assert kw["params"] == {"chat_id": "443805158", "type": "image"}
+    assert kw["headers"]["Authorization"] == "tok"
+    # step 2: the file goes to the returned URL as multipart field "data",
+    # without the bot token (the upload host is not the API host)
+    url, kw = fh.calls[1]
+    assert url == "https://upl.max.ru/u/abc"
+    assert "data" in kw["files"]
+    assert not kw.get("headers")
+    # step 3: the token from the photos dict lands in the attachment
+    url, kw = fh.calls[2]
+    assert url.endswith("/messages")
+    assert kw["params"] == {"chat_id": "443805158"}
+    assert kw["json"]["attachments"] == [
+        {"type": "image", "payload": {"token": "photo-token"}}
+    ]
+    assert kw["json"]["text"] == "смотри"
