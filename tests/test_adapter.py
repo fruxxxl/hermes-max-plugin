@@ -102,6 +102,10 @@ class FakeHttp:
         self.calls.append((url, kw))
         return FakeResp()
 
+    async def patch(self, url, **kw):
+        self.calls.append((url, kw))
+        return FakeResp()
+
 
 def make_adapter():
     a = MaxAdapter(PlatformConfig(enabled=True))
@@ -315,3 +319,26 @@ def test_send_media_uses_uploads_flow(tmp_path):
         {"type": "image", "payload": {"token": "photo-token"}}
     ]
     assert kw["json"]["text"] == "смотри"
+
+
+def test_sync_bot_commands_registers_native_suggestions(monkeypatch):
+    # native "/" suggestions: PATCH /me with registry commands; names WITHOUT
+    # the leading slash, adapter-local /menu pinned first, empty descriptions
+    # omitted, long ones trimmed to the schema max
+    monkeypatch.setattr(
+        adapter_mod,
+        "_core_menu_commands",
+        lambda: [("status", "s"), ("reset", ""), ("stop", "t" * 200)],
+    )
+    a = make_adapter()
+    fh = FakeHttp()
+    a._http_client = fh
+    asyncio.run(a._sync_bot_commands())
+    url, kw = fh.calls[0]
+    assert url == "https://botapi.max.ru/me"
+    assert kw["headers"]["Authorization"] == "tok"
+    cmds = kw["json"]["commands"]
+    assert cmds[0] == {"name": "menu", "description": "Показать меню команд"}
+    assert [c["name"] for c in cmds[1:]] == ["status", "reset", "stop"]
+    assert "description" not in cmds[2]  # empty description -> omitted
+    assert len(cmds[3]["description"]) == 128

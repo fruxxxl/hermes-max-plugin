@@ -11,6 +11,8 @@ Connects to the MAX messenger (dev.max.ru) Bot API:
 - ``/menu`` command replies with an inline keyboard of the agent's slash
   commands (MAX has no setMyCommands; button presses arrive as
   ``message_callback`` updates and re-enter the agent as commands)
+- Native ``/`` command suggestions: the agent's commands are synced to the
+  bot profile via ``PATCH /me`` (``commands`` field, up to 32 items)
 
 No external SDK — only httpx, already a Hermes dependency.
 
@@ -96,6 +98,9 @@ TYPING_REFRESH_S = 2.0     # re-fire typing_on while a turn is in flight (server
 MENU_COMMAND = "/menu"
 MENU_MAX_BUTTONS = 12
 MENU_BUTTONS_PER_ROW = 2
+BOT_COMMANDS_LIMIT = 32      # BotPatch.commands maxItems
+BOT_COMMAND_NAME_MAX = 64    # BotCommand.name maxLength
+BOT_COMMAND_DESC_MAX = 128   # BotCommand.description maxLength
 POLL_TIMEOUT_SECONDS = 30  # server-side long poll window
 POLL_HTTP_TIMEOUT = POLL_TIMEOUT_SECONDS + 20
 RECONNECT_BACKOFF = [2, 5, 10, 30, 60]
@@ -180,6 +185,7 @@ class MaxAdapter(BasePlatformAdapter):
                 "[%s] Connected as @%s (%s)",
                 self.name, me.get("username", "?"), me.get("name", "?"),
             )
+            await self._sync_bot_commands()
             self._poll_task = asyncio.create_task(self._run_poll())
             self._mark_connected()
             return True
@@ -415,6 +421,47 @@ class MaxAdapter(BasePlatformAdapter):
         if row:
             rows.append(row)
         return rows
+
+    async def _sync_bot_commands(self) -> None:
+        """Register the agent's commands as native bot commands (PATCH /me).
+
+        MAX clients suggest them when the user types ``/``. Names are stored
+        WITHOUT the leading slash (real /me payloads); the API caps the list
+        at 32 items and drops empty descriptions (minLength: 1). The adapter-
+        local /menu command is pinned first so it always makes the cut.
+        Failures are non-fatal: suggestions are a nicety, not a requirement.
+        """
+        if not self._http_client:
+            return
+        menu_name = MENU_COMMAND.lstrip("/")
+        commands: List[Dict[str, str]] = [
+            {"name": menu_name, "description": "Показать меню команд"},
+        ]
+        for name, desc in _core_menu_commands():
+            if name == menu_name:
+                continue
+            cmd: Dict[str, str] = {"name": name[:BOT_COMMAND_NAME_MAX]}
+            if desc and desc.strip():
+                cmd["description"] = desc.strip()[:BOT_COMMAND_DESC_MAX]
+            commands.append(cmd)
+            if len(commands) >= BOT_COMMANDS_LIMIT:
+                break
+        try:
+            resp = await self._http_client.patch(
+                f"{self._api}/me",
+                headers=self._headers(),
+                json={"commands": commands},
+                timeout=20.0,
+            )
+            if resp.status_code < 300:
+                logger.info("[%s] Synced %d native bot commands", self.name, len(commands))
+            else:
+                logger.warning(
+                    "[%s] sync bot commands HTTP %s: %s",
+                    self.name, resp.status_code, resp.text[:200],
+                )
+        except Exception as e:
+            logger.warning("[%s] sync bot commands failed: %s", self.name, e)
 
     async def send_menu(self, chat_id: str) -> None:
         """Send the bot command menu as an inline keyboard (MAX Bot API has
