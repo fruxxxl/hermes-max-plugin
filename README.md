@@ -5,6 +5,18 @@
 AI-агента в MAX параллельно с Telegram, WhatsApp, Discord и другими
 платформами Hermes-шлюза.
 
+Подходит для собственного Hermes-агента, с которым нужно общаться в MAX.
+Плагин передаёт сообщения между мессенджером и агентом; доступные инструменты
+и правила работы вы настраиваете в Hermes. Реализация транспорта:
+[`adapter.py`](plugins/platforms/max/adapter.py).
+
+**English:** MAX messenger adapter for an existing Hermes Agent deployment.
+It connects chats to the agent through the MAX Bot API, with long polling,
+text replies, photo uploads, and a command menu.
+
+Автор: [Александр Шульгин, PROCESA](https://procesa.ru/about/).
+[Разработка инструментов и автоматизация для бизнеса](https://procesa.ru/).
+
 ```
 MAX (клиент) ──▶ MAX Bot API ──▶ плагин ──▶ Hermes Agent ──▶ инструменты, скиллы, память
 ```
